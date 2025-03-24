@@ -1,0 +1,12 @@
+.idea/
+.lightning_studio/
+.vscode/
+CT-CLIP_v2.pt
+data/
+examples/
+getting_started.ipynb
+models/
+test.ipynb
+test.py
+test/
+test_XY/

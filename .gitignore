@@ -13,3 +13,4 @@ test_XY/
 vqa/
 reports/
 nltk_data/
+.env

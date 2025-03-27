@@ -20,3 +20,8 @@ ipython
 h5py
 seaborn
 accelerate
+sentencepiece
+peft==0.3.0
+rouge-score 
+nltk 
+bert-score

@@ -10,3 +10,6 @@ test.ipynb
 test.py
 test/
 test_XY/
+vqa/
+reports/
+nltk_data/

@@ -5,7 +5,7 @@ import nibabel as nib
 import logging
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from peft import PeftModel, LoraConfig, get_peft_model
-from test import preprocess_ct_scan, load_preprocessed_scan
+import torch.nn.functional as F
 import nltk
 nltk.download('punkt')
 
@@ -13,6 +13,48 @@ nltk.download('punkt')
 # Setup logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+
+def load_preprocessed_scan(file_path):
+    data = np.load(file_path)
+    
+    # Assuming the array is saved as the first (and only) item in the .npz file
+    scan_array = data[data.files[0]]
+    
+    # Convert to torch tensor
+    # Add batch and channel dimensions
+    tensor = torch.from_numpy(scan_array).float()
+    tensor = tensor.unsqueeze(0).unsqueeze(0)  # [1, 1, depth, height, width]
+    
+    return tensor
+
+def preprocess_ct_scan(ct_scan, target_size=480, target_depth=240):
+    # Ensure tensor is 4D or 5D: [batch, channel, depth, height, width]
+    if ct_scan.dim() == 3:
+        ct_scan = ct_scan.unsqueeze(0)
+    
+    batch, channel, depth, height, width = ct_scan.shape
+    
+    # Select middle slices and reshape to match model expectations
+    if depth > target_depth:
+        start = (depth - target_depth) // 2
+        ct_scan = ct_scan[:, :, start:start+target_depth, :, :]
+    elif depth < target_depth:
+        # Pad if fewer slices
+        pad_size = target_depth - depth
+        pad_before = pad_size // 2
+        pad_after = pad_size - pad_before
+        ct_scan = F.pad(ct_scan, (0, 0, 0, 0, pad_before, pad_after), mode='constant', value=0)
+    
+    # Resize to target size (260 allows for 13x20 patches)
+    ct_scan_resized = F.interpolate(
+        ct_scan.float(), 
+        size=(target_depth, target_size, target_size), 
+        mode='trilinear', 
+        align_corners=False
+    )
+    
+    return ct_scan_resized
 
 
 def load_vision_feature_extractor():
@@ -170,6 +212,8 @@ def main(ct_scan_path, question=None):
     print("Input CT Scan:", ct_scan_path)
     print("Question:", question)
     print("Model Response:", response)
+
+    return response
 
 if __name__ == "__main__":
     import sys

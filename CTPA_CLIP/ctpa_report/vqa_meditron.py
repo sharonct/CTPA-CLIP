@@ -9,7 +9,7 @@ import logging
 from torch.utils.data import Dataset, DataLoader
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from peft import LoraConfig, get_peft_model
-from pretrained_model import ctclip  # Import CT-ViT from CT-CLIP
+from ct_clip.pretrained_model import ctclip
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, 
@@ -174,6 +174,7 @@ class CustomVQADataset(Dataset):
             assert image_tensor.shape == (C, self.target_depth, self.target_size, self.target_size), "Shape mismatch after resizing!"
 
             text = item["question"] + " " + item["answer"]
+            print(text)
 
             return image_tensor, text
         
@@ -447,7 +448,7 @@ def main():
     dataloader = DataLoader(dataset, batch_size=1, shuffle=True)
 
     # Training
-    train_model(dataloader, llm, vision_encoder, optimizer, scheduler, num_epochs=10, save_path="/teamspace/studios/this_studio/vqa/model")
+    # train_model(dataloader, llm, vision_encoder, optimizer, scheduler, num_epochs=10, save_path="/teamspace/studios/this_studio/vqa/model")
 
 if __name__ == "__main__":
     main()

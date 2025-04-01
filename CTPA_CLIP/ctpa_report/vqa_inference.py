@@ -15,7 +15,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from peft import PeftModel, LoraConfig, get_peft_model
 
 from vqa_meditron import VisionFeatureExtractor
-from pretrained_model import ctclip
+from ct_clip.pretrained_model import ctclip
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)

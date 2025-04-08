@@ -3,9 +3,9 @@ import json
 import pandas as pd
 
 # Paths to dataset
-image_dir = "/teamspace/studios/this_studio/data/test_preprocessed/test_PE"
-report_csv = "/teamspace/studios/this_studio/data/test_reports.csv"
-output_jsonl = "/teamspace/studios/this_studio/data/vqa_dataset_eval.jsonl"
+image_dir = "/teamspace/studios/this_studio/data/train/train_PE"
+report_csv = "/teamspace/studios/this_studio/data/reports_train.csv"
+output_jsonl = "/teamspace/studios/this_studio/data/train_vqa_dataset.jsonl"
 
 # Load reports
 reports_df = pd.read_csv(report_csv)
@@ -25,7 +25,7 @@ def create_vqa_jsonl():
             impression_text = row["impressions"].strip()
 
             # Locate Image File
-            image_folder = os.path.join(image_dir, f"test_{impression_id}")
+            image_folder = os.path.join(image_dir, f"train_{impression_id}")
             image_path = os.path.join(image_folder, f"{impression_id}.npz")
             
             if not os.path.exists(image_path):

@@ -76,7 +76,7 @@ def process_file(file_path):
     resized_array = resize_array(tensor, current, target)
     resized_array = resized_array[0][0]
 
-    save_folder = "/teamspace/studios/this_studio/data/train_df2_preprocessed/"
+    save_folder = "/teamspace/studios/this_studio/data/train"
     file_name_no_ext = file_name.split(".")[0]  
     subfolder = "train_" + file_name_no_ext[:2]
     subsubfolder = "train_" + file_name_no_ext 
@@ -88,13 +88,13 @@ def process_file(file_path):
     np.savez(save_path, resized_array)
 
 
-train_ctpa = '/teamspace/studios/this_studio/test'
+train_ctpa = '/teamspace/studios/this_studio/inspect_data'
 nii_files = read_nii_files(train_ctpa)
 
 all_files = sorted(os.listdir(train_ctpa))
-split_idx = int(len(all_files) * 0.8)
+# split_idx = int(len(all_files) * 0.8)
 
-nii_files = nii_files[:split_idx]
+# nii_files = nii_files[:split_idx]
 
 df: Any = train_df
 

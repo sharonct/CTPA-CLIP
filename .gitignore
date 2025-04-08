@@ -14,4 +14,4 @@ vqa/
 reports/
 nltk_data/
 .env
-inspect_data.zip
+inspect_data

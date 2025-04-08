@@ -39,13 +39,13 @@ def extract_nii_metadata(directory):
     
     return df
 
-ct_metadata = extract_nii_metadata('/teamspace/studios/this_studio/test')
+ct_metadata = extract_nii_metadata('/teamspace/studios/this_studio/inspect_data')
 
 split_idx = int(len(ct_metadata) * 0.8)
 
-train_df = ct_metadata.iloc[:split_idx]
+train_df = ct_metadata
 test_df = ct_metadata.iloc[split_idx:]
 
 
-train_df.to_csv("/teamspace/studios/this_studio/data/train_df_metadata.csv", index=False)
+train_df.to_csv("/teamspace/studios/this_studio/data/train_metadata.csv", index=False)
 test_df.to_csv("/teamspace/studios/this_studio/data/test_df_metadata.csv", index=False)

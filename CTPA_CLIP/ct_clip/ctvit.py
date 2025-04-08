@@ -16,7 +16,7 @@ from einops.layers.torch import Rearrange
 
 from vector_quantize_pytorch import VectorQuantize
 
-from attention import Attention, Transformer, ContinuousPositionBias
+from ct_clip.attention import Attention, Transformer, ContinuousPositionBias
 
 # helpers
 

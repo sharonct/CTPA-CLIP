@@ -1,4 +1,5 @@
 import os
+import sys
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -9,6 +10,8 @@ import logging
 from torch.utils.data import Dataset, DataLoader
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from peft import LoraConfig, get_peft_model
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from ct_clip.pretrained_model import ctclip
 
 # Set up logging

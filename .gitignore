@@ -1,6 +1,7 @@
 .idea/
 .lightning_studio/
 .vscode/
+__pycache__/
 CT-CLIP_v2.pt
 data/
 examples/

@@ -8,14 +8,13 @@ import torch.nn.functional as F
 from multiprocessing import Pool
 from tqdm import tqdm
 
-from data_prep import train_df
-
+train_df = pd.read_csv("/teamspace/studios/this_studio/CTPA-CLIP/data/train_ctpa_metadata.csv")
 
 def read_nii_files(directory):
     nii_files = []
     for root, dirs, files in os.walk(directory):
         for file in files:
-            if file.endswith('.nii'):
+            if file.endswith(".nii") or file.endswith(".nii.gz"):
                 nii_files.append(os.path.join(root, file))
     return nii_files
 
@@ -76,7 +75,7 @@ def process_file(file_path):
     resized_array = resize_array(tensor, current, target)
     resized_array = resized_array[0][0]
 
-    save_folder = "/teamspace/studios/this_studio/data/train"
+    save_folder = "/teamspace/studios/this_studio/CTPA-CLIP/data/train_ctpa"
     file_name_no_ext = file_name.split(".")[0]  
     subfolder = "train_" + file_name_no_ext[:2]
     subsubfolder = "train_" + file_name_no_ext 
@@ -88,13 +87,14 @@ def process_file(file_path):
     np.savez(save_path, resized_array)
 
 
-train_ctpa = '/teamspace/studios/this_studio/inspect_data'
+train_ctpa = '/teamspace/studios/this_studio/inspect/inspect2/CTPA'
 nii_files = read_nii_files(train_ctpa)
+print(nii_files)
 
 all_files = sorted(os.listdir(train_ctpa))
-# split_idx = int(len(all_files) * 0.8)
+split_idx = int(len(all_files) * 0.8)
 
-# nii_files = nii_files[:split_idx]
+nii_files = nii_files[:split_idx]
 
 df: Any = train_df
 

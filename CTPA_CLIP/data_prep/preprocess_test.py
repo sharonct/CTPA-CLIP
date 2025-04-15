@@ -14,7 +14,7 @@ def read_nii_files(directory):
     nii_files = []
     for root, dirs, files in os.walk(directory):
         for file in files:
-            if file.endswith('.nii'):
+            if file.endswith(".nii") or file.endswith(".nii.gz"):
                 nii_files.append(os.path.join(root, file))
     return nii_files
 

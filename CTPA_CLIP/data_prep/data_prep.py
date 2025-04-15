@@ -39,7 +39,7 @@ def extract_nii_metadata(directory):
     
     return df
 
-ct_metadata = extract_nii_metadata('/teamspace/studios/this_studio/inspect_data')
+ct_metadata = extract_nii_metadata('/teamspace/studios/this_studio/inspect/inspect2/CTPA')
 
 split_idx = int(len(ct_metadata) * 0.8)
 
@@ -47,5 +47,5 @@ train_df = ct_metadata
 test_df = ct_metadata.iloc[split_idx:]
 
 
-train_df.to_csv("/teamspace/studios/this_studio/data/train_metadata.csv", index=False)
-test_df.to_csv("/teamspace/studios/this_studio/data/test_df_metadata.csv", index=False)
+train_df.to_csv("/teamspace/studios/this_studio/CTPA-CLIP/data/train_ctpa_metadata.csv", index=False)
+test_df.to_csv("/teamspace/studios/this_studio/CTPA-CLIP/data/test_ctpa_metadata.csv", index=False)

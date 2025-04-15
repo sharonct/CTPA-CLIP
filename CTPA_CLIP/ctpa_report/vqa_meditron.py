@@ -426,7 +426,6 @@ def main():
     llm = AutoModelForCausalLM.from_pretrained(llm_name, torch_dtype=torch.bfloat16, use_auth_token=True).to(device)
 
     # Load CT-ViT as visual encoder
-    from pretrained_model import ctclip
     vision_encoder = ctclip.visual_transformer
 
     # Stage 2: Fine-tuning with LoRA
@@ -447,11 +446,11 @@ def main():
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=10)
 
     # Dataset and DataLoader
-    dataset = CustomVQADataset("/teamspace/studios/this_studio/data/vqa_dataset.jsonl")
+    dataset = CustomVQADataset("/teamspace/studios/this_studio/CTPA-CLIP/data/train_vqa_dataset.jsonl")
     dataloader = DataLoader(dataset, batch_size=1, shuffle=True)
 
     # Training
-    # train_model(dataloader, llm, vision_encoder, optimizer, scheduler, num_epochs=10, save_path="/teamspace/studios/this_studio/vqa/model")
+    train_model(dataloader, llm, vision_encoder, optimizer, scheduler, num_epochs=10, save_path="/teamspace/studios/this_studio/models/vqa/model")
 
 if __name__ == "__main__":
     main()

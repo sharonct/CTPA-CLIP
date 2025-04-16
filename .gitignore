@@ -11,3 +11,4 @@ vqa/
 reports/
 nltk_data/
 .env
+venv/

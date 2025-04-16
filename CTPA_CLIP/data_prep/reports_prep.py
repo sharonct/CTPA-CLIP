@@ -85,9 +85,9 @@ def preprocess_impressions(text):
     return final_text if final_text else None  
 
 
-reports = pd.read_csv('/teamspace/studios/this_studio/data/Final_Impressions.csv')
+reports = pd.read_csv('C:/Users/STRATHMORE/Desktop/Sharon_Tonui/CTPA-CLIP/CTPA_CLIP/data/Final_Impressions.csv')
 
 reports['impressions'] = reports['impressions'].apply(preprocess_impressions)
 reports['impressions'] = reports['impressions'].replace("", np.nan)
 reports.dropna(subset=['impressions'], inplace=True)
-reports.to_csv("/teamspace/studios/this_studio/data/all_reports.csv")
+reports.to_csv("C:/Users/STRATHMORE/Desktop/Sharon_Tonui/CTPA-CLIP/CTPA_CLIP/data/all_reports.csv")

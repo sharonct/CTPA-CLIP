@@ -99,7 +99,7 @@ def process_file(args):
     img_data = slope * img_data + intercept
     hu_min, hu_max = -1000, 1000
     img_data = np.clip(img_data, hu_min, hu_max)
-    img_data = ((img_data / 1000)).astype(np.float32)
+    img_data = ((img_data / 1000)).astype(np.float16)
 
     img_data = img_data.transpose(2, 0, 1)
     tensor = torch.tensor(img_data)

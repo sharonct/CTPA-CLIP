@@ -3,9 +3,9 @@ import json
 import pandas as pd
 
 # Paths to dataset
-image_dir = "C:/Users/STRATHMORE/Desktop/Sharon_Tonui/CTPA-CLIP/CTPA_CLIP/data/test/test_PE"
-report_csv = "C:/Users/STRATHMORE/Desktop/Sharon_Tonui/CTPA-CLIP/CTPA_CLIP/data/all_reports.csv"
-output_jsonl = "C:/Users/STRATHMORE/Desktop/Sharon_Tonui/CTPA-CLIP/CTPA_CLIP/data/test_dataset.jsonl"
+image_dir = "/teamspace/studios/this_studio/CTPA-CLIP/data/test/test_PE"
+report_csv = "/teamspace/studios/this_studio/CTPA-CLIP/data/all_reports.csv"
+output_jsonl = "/teamspace/studios/this_studio/CTPA-CLIP/data/test_dataset.jsonl"
 
 # Load reports
 reports_df = pd.read_csv(report_csv)

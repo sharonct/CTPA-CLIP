@@ -48,5 +48,5 @@ print(torch.version.cuda)
 print(torch.cuda.is_available())
 print(device)
 
-ctclip.load('C:/Users/STRATHMORE/Desktop/Sharon_Tonui/CTPA-CLIP/CTPA_CLIP/models/CT-CLIP_v2.pt')
+ctclip.load('/teamspace/studios/this_studio/CTPA-CLIP/CT-CLIP_v2.pt')
 ctclip.to(device)

@@ -109,7 +109,7 @@ def process_file(args):
     resized_array = resize_array(tensor, current, target)
     resized_array = resized_array[0][0]
 
-    save_folder = "C:/Users/STRATHMORE/Desktop/Sharon_Tonui/CTPA-CLIP/CTPA_CLIP/data/test"
+    save_folder = "/teamspace/studios/this_studio/CTPA-CLIP/data/test"
     file_name_no_ext = file_name.split(".")[0]  
     subfolder = "test_" + file_name_no_ext[:2]
     subsubfolder = "test_" + file_name_no_ext 
@@ -135,9 +135,9 @@ if __name__ == "__main__":
     freeze_support()  # For Windows compatibility
 
     # Load the dataframe once
-    test_df = pd.read_csv("C:/Users/STRATHMORE/Desktop/Sharon_Tonui/CTPA-CLIP/CTPA_CLIP/data/test_metadata.csv")
+    test_df = pd.read_csv("/teamspace/studios/this_studio/CTPA-CLIP/data/test_metadata.csv")
 
-    test_ctpa = 'C:/Users/STRATHMORE/Desktop/Sharon_Tonui/CTPA-CLIP/CTPA_CLIP/data/inspect'
+    test_ctpa = '/teamspace/studios/this_studio/CTPA-CLIP/data/inspect'
     nii_files = read_nii_files(test_ctpa)
 
     # Make sure we're processing files that exist in the metadata

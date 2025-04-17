@@ -108,7 +108,7 @@ def process_file(args):
     resized_array = resize_array(tensor, current, target)
     resized_array = resized_array[0][0]
 
-    save_folder = "C:/Users/STRATHMORE/Desktop/Sharon_Tonui/CTPA-CLIP/CTPA_CLIP/data/train"
+    save_folder = "/teamspace/studios/this_studio/CTPA-CLIP/data/train"
     file_name_no_ext = file_name.split(".")[0]  
     subfolder = "train_" + file_name_no_ext[:2]
     subsubfolder = "train_" + file_name_no_ext 
@@ -132,9 +132,9 @@ if __name__ == "__main__":
     freeze_support()  # For Windows compatibility
 
     # Load the dataframe once
-    train_df = pd.read_csv("C:/Users/STRATHMORE/Desktop/Sharon_Tonui/CTPA-CLIP/CTPA_CLIP/data/train_metadata.csv")
+    train_df = pd.read_csv("/teamspace/studios/this_studio/CTPA-CLIP/data/train_metadata.csv")
 
-    train_ctpa = 'C:/Users/STRATHMORE/Desktop/Sharon_Tonui/CTPA-CLIP/CTPA_CLIP/data/inspect'
+    train_ctpa = '/teamspace/studios/this_studio/CTPA-CLIP/data/inspect'
     nii_files = read_nii_files(train_ctpa)
 
     # Make sure we're processing files that exist in the metadata

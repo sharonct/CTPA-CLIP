@@ -85,12 +85,12 @@ def main():
     config = {
         # General
         "mode": "train_and_evaluate",  # "train", "evaluate", or "train_and_evaluate"
-        "save_path": "C:/Users/STRATHMORE/Desktop/Sharon_Tonui/CTPA-CLIP/CTPA_CLIP/models/ct_report",
-        "output_dir": "C:/Users/STRATHMORE/Desktop/Sharon_Tonui/CTPA-CLIP/CTPA_CLIP/models/evaluation_results",
+        "save_path": "/teamspace/studios/this_studio/CTPA-CLIP/models/ct_report",
+        "output_dir": "/teamspace/studios/this_studio/CTPA-CLIP/models/evaluation_results",
         
         # Training
-        "train_data_path": "C:/Users/STRATHMORE/Desktop/Sharon_Tonui/CTPA-CLIP/CTPA_CLIP/data/train_dataset.jsonl",
-        "test_data_path": "C:/Users/STRATHMORE/Desktop/Sharon_Tonui/CTPA-CLIP/CTPA_CLIP/data/test_dataset.jsonl",
+        "train_data_path": "/teamspace/studios/this_studio/CTPA-CLIP/data/train_dataset.jsonl",
+        "test_data_path": "/teamspace/studios/this_studio/CTPA-CLIP/data/test_dataset.jsonl",
         "batch_size": 2,
         "num_epochs": 10,
         "val_ratio": 0.1,
@@ -101,7 +101,7 @@ def main():
         "eval_frequency": 2,  # Evaluate every N epochs
 
         # Evaluation
-        "model_path": "C:/Users/STRATHMORE/Desktop/Sharon_Tonui/CTPA-CLIP/CTPA_CLIP/models/ct_report/best_model_by_validation.pt",
+        "model_path": "/teamspace/studios/this_studio/CTPA-CLIP/models/ct_report/best_model_by_validation.pt",
         "visualize_samples": True,
         "num_samples": 5,
         

@@ -41,7 +41,12 @@ ctclip = CTCLIP(
 
 )
 
-device = "cuda" if torch.cuda.is_available() else "cpu"
+#pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
 
-ctclip.load('/teamspace/studios/this_studio/CT-CLIP_v2.pt')
+device = "cuda" if torch.cuda.is_available() else "cpu"
+print(torch.version.cuda)
+print(torch.cuda.is_available())
+print(device)
+
+ctclip.load('C:/Users/STRATHMORE/Desktop/Sharon_Tonui/CTPA-CLIP/CTPA_CLIP/models/CT-CLIP_v2.pt')
 ctclip.to(device)

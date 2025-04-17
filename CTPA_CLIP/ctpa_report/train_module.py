@@ -10,6 +10,7 @@ import matplotlib.pyplot as plt
 from torch.utils.data import Dataset, DataLoader
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from peft import LoraConfig, get_peft_model
+from ct_clip.pretrained_model import ctclip
 
 # Import local modules
 from model_components import CTReportGenerator, RobustVisionFeatureExtractor, CrossAttentionLayer
@@ -24,11 +25,6 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 logger.info(f"Using device: {device}")
 
 
-# def train_report_generator(model, dataset, optimizer, scheduler, num_epochs=5, 
-#                           batch_size=2, save_path="./models/ct_report",
-#                           eval_dataset=None, eval_frequency=1, vision_encoder=None,
-#                           evaluator=None):
-
 def train_report_generator(model, train_dataset, optimizer, scheduler, 
                           test_dataset=None, eval_frequency=2, num_epochs=5, 
                           batch_size=2, save_path="./models/ct_report",
@@ -38,14 +34,14 @@ def train_report_generator(model, train_dataset, optimizer, scheduler,
     
     Args:
         model: CT report generator model
-        dataset: Dataset for training
+        train_dataset: Dataset for training
         optimizer: Optimizer for training
         scheduler: Learning rate scheduler
+        test_dataset: Dataset for evaluation (optional)
+        eval_frequency: Evaluate every N epochs
         num_epochs: Number of training epochs
         batch_size: Batch size for training
         save_path: Path to save the model
-        eval_dataset: Dataset for evaluation (optional)
-        eval_frequency: Evaluate every N epochs
         vision_encoder: Vision encoder for evaluation
         evaluator: NLGMetricsEvaluator instance (optional)
         
@@ -53,20 +49,13 @@ def train_report_generator(model, train_dataset, optimizer, scheduler,
         tuple: (best_model_path, metrics_tracker)
     """
     # Create dataloaders
-    # train_dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
     train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
     
     # Create evaluation dataloader if evaluation dataset is provided
-    # if eval_dataset and evaluator is None:
-    #     from evaluation_module import NLGMetricsEvaluator
-    #     eval_dataloader = DataLoader(eval_dataset, batch_size=1, shuffle=False)
-    #     evaluator = NLGMetricsEvaluator(model, vision_encoder, eval_dataloader, device=device)
-
     if test_dataset and evaluator is None:
         from evaluation_module import NLGMetricsEvaluator
         test_dataloader = DataLoader(test_dataset, batch_size=1, shuffle=False)
         evaluator = NLGMetricsEvaluator(model, vision_encoder, test_dataloader, device=device)
-
     
     # Initialize metrics tracker
     metrics_tracker = TrainingMetricsTracker(save_dir=os.path.join(save_path, "metrics"))
@@ -78,6 +67,10 @@ def train_report_generator(model, train_dataset, optimizer, scheduler,
     global_batch_idx = 0
     best_model_path = None
     best_val_score = -float('inf')
+    best_loss = float('inf')
+    
+    # Ensure save directory exists
+    os.makedirs(save_path, exist_ok=True)
     
     # Training loop
     for epoch in range(num_epochs):
@@ -156,29 +149,28 @@ def train_report_generator(model, train_dataset, optimizer, scheduler,
                                  torch.optim.lr_scheduler.CosineAnnealingLR)):
             scheduler.step()
         
-        # Save checkpoint
-        checkpoint_path = os.path.join(save_path, f"checkpoint_epoch_{epoch+1}.pt")
-        torch.save({
-            "model_state_dict": model.state_dict(),
-            "optimizer_state_dict": optimizer.state_dict(),
-            "scheduler_state_dict": scheduler.state_dict(),
-            "epoch": epoch,
-            "loss": avg_epoch_loss
-        }, checkpoint_path)
-        logger.info(f"Checkpoint saved to {checkpoint_path}")
+        # Only save model if loss has improved
+        if avg_epoch_loss < best_loss:
+            best_loss = avg_epoch_loss
+            best_loss_path = os.path.join(save_path, "best_model_by_loss.pt")
+            
+            logger.info(f"New best loss: {avg_epoch_loss:.4f}. Saving model...")
+            
+            torch.save({
+                "model_state_dict": model.state_dict(),
+                "optimizer_state_dict": optimizer.state_dict(),
+                "scheduler_state_dict": scheduler.state_dict(),
+                "epoch": epoch,
+                "loss": avg_epoch_loss
+            }, best_loss_path)
+            
+            logger.info(f"Best model (by loss) saved to {best_loss_path}")
+            
+            # If no validation data, use the best loss model as the overall best
+            if test_dataset is None:
+                best_model_path = best_loss_path
         
-        # If this is the best model based on training loss, create a best_model.pt link
-        if is_best_loss:
-            best_model_path = os.path.join(save_path, "best_model_by_loss.pt")
-            try:
-                # Copy the file (more compatible but uses more disk space)
-                import shutil
-                shutil.copy2(checkpoint_path, best_model_path)
-                logger.info(f"New best model (by loss) saved with loss: {avg_epoch_loss:.4f}")
-            except Exception as e:
-                logger.error(f"Error copying best model: {e}")
-        
-        # Evaluation step (if eval_dataset is provided)
+        # Evaluation step (if test_dataset is provided)
         if test_dataset and evaluator and (epoch + 1) % eval_frequency == 0:
             logger.info(f"Running evaluation after epoch {epoch+1}...")
             
@@ -205,15 +197,21 @@ def train_report_generator(model, train_dataset, optimizer, scheduler,
                 best_val_score = val_score
                 best_val_model_path = os.path.join(save_path, "best_model_by_validation.pt")
                 
-                try:
-                    import shutil
-                    shutil.copy2(checkpoint_path, best_val_model_path)
-                    logger.info(f"New best model (by validation) saved with score: {val_score:.4f}")
-                    
-                    # Update the best overall model path if this is better than the previous best
-                    best_model_path = best_val_model_path
-                except Exception as e:
-                    logger.error(f"Error copying best validation model: {e}")
+                logger.info(f"New best validation score: {val_score:.4f}. Saving model...")
+                
+                torch.save({
+                    "model_state_dict": model.state_dict(),
+                    "optimizer_state_dict": optimizer.state_dict(),
+                    "scheduler_state_dict": scheduler.state_dict(),
+                    "epoch": epoch,
+                    "val_score": val_score,
+                    "loss": avg_epoch_loss
+                }, best_val_model_path)
+                
+                logger.info(f"Best model (by validation) saved to {best_val_model_path}")
+                
+                # Update the best overall model path
+                best_model_path = best_val_model_path
             
             # Save evaluation results
             eval_save_path = os.path.join(save_path, "metrics", f"eval_epoch_{epoch+1}.json")
@@ -254,28 +252,23 @@ def save_checkpoint(model, optimizer, scheduler, epoch, loss, save_path, is_best
         str: Path to the saved checkpoint
     """
     os.makedirs(save_path, exist_ok=True)
-    checkpoint_path = os.path.join(save_path, f"checkpoint_epoch_{epoch+1}.pt")
     
-    torch.save({
-        "model_state_dict": model.state_dict(),
-        "optimizer_state_dict": optimizer.state_dict(),
-        "scheduler_state_dict": scheduler.state_dict(),
-        "epoch": epoch,
-        "loss": loss
-    }, checkpoint_path)
-    
-    # If this is the best model, create a copy or symlink
+    # Only save if this is the best model so far
     if is_best:
         best_path = os.path.join(save_path, "best_model.pt")
-        try:
-            # Copy the file (more compatible but uses more disk space)
-            import shutil
-            shutil.copy2(checkpoint_path, best_path)
-        except Exception as e:
-            logger.error(f"Error copying best model: {e}")
+        
+        torch.save({
+            "model_state_dict": model.state_dict(),
+            "optimizer_state_dict": optimizer.state_dict(),
+            "scheduler_state_dict": scheduler.state_dict(),
+            "epoch": epoch,
+            "loss": loss
+        }, best_path)
+        
+        logger.info(f"Best model saved to {best_path}")
+        return best_path
     
-    logger.info(f"Checkpoint saved to {checkpoint_path}")
-    return checkpoint_path
+    return None
 
 
 def setup_training(train_data, val_data, save_path, batch_size=2, num_epochs=10, 
@@ -321,9 +314,6 @@ def setup_training(train_data, val_data, save_path, batch_size=2, num_epochs=10,
     
     # Import CT-CLIP
     try:
-        import sys
-        sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-        from ct_clip.pretrained_model import ctclip
         vision_encoder = ctclip.visual_transformer
         logger.info("Loaded CT-CLIP vision encoder")
     except ImportError:
@@ -399,51 +389,19 @@ def setup_training(train_data, val_data, save_path, batch_size=2, num_epochs=10,
     
     logger.info(f"Starting training for {num_epochs} epochs...")
     
-    # Make sure the train_report_generator function parameters match what it expects
+    # Train model
     best_model_path, metrics_tracker = train_report_generator(
         model=model,
-        train_dataset=train_data,  # Changed from "dataset" to "train_dataset"
+        train_dataset=train_data,
         optimizer=optimizer,
         scheduler=scheduler,
         num_epochs=num_epochs,
         batch_size=batch_size,
         save_path=save_path,
-        test_dataset=val_data,  # Changed from "eval_dataset" to "test_dataset"
+        test_dataset=val_data,
         eval_frequency=1,  
         vision_encoder=vision_encoder,
         evaluator=evaluator
     )
     
     return best_model_path, metrics_tracker
-
-
-# if __name__ == "__main__":
-#     # Configure training parameters directly (no argparse)
-#     train_data_path = "/path/to/train_dataset.jsonl"
-#     val_data_path = "/path/to/val_dataset.jsonl"
-#     save_path = "./models/ct_report"
-#     batch_size = 2
-#     num_epochs = 10
-#     learning_rate = 2e-5
-#     cross_attention_lr = 1e-4
-#     lora_r = 16
-#     lora_alpha = 32
-    
-#     # Run training
-#     best_model_path, _ = setup_training(
-#         train_data_path=train_data_path,
-#         val_data_path=val_data_path,
-#         save_path=save_path,
-#         batch_size=batch_size,
-#         num_epochs=num_epochs,
-#         lr=learning_rate,
-#         cross_attention_lr=cross_attention_lr,
-#         lora_r=lora_r,
-#         lora_alpha=lora_alpha
-#     )
-    
-#     # Final message
-#     if best_model_path:
-#         logger.info(f"CT Report Generation training completed successfully! Best model: {best_model_path}")
-#     else:
-#         logger.error("Training failed to complete successfully.")

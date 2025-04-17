@@ -3,6 +3,9 @@ import logging
 import json
 import numpy as np
 import os
+
+import nltk
+nltk.download('punkt')
 from rouge_score import rouge_scorer
 from nltk.translate.bleu_score import sentence_bleu
 from nltk.tokenize import word_tokenize

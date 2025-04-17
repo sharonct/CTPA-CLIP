@@ -25,7 +25,7 @@ def extract_nii_metadata(directory):
 
                 # Extract voxel spacing (X, Y, Z)
                 voxel_spacing = header["pixdim"][1:4] 
-                xy_spacing = list(voxel_spacing[:2])  
+                xy_spacing = [float(v) for v in voxel_spacing[:2]]
                 z_spacing = voxel_spacing[2]  # Z 
 
                 # Append to list
@@ -39,7 +39,7 @@ def extract_nii_metadata(directory):
     
     return df
 
-ct_metadata = extract_nii_metadata('/teamspace/studios/this_studio/inspect/inspect2/CTPA')
+ct_metadata = extract_nii_metadata('C:/Users/STRATHMORE/Desktop/Sharon_Tonui/CTPA-CLIP/CTPA_CLIP/data/inspect')
 
 split_idx = int(len(ct_metadata) * 0.8)
 
@@ -47,5 +47,5 @@ train_df = ct_metadata
 test_df = ct_metadata.iloc[split_idx:]
 
 
-train_df.to_csv("/teamspace/studios/this_studio/CTPA-CLIP/data/train_ctpa_metadata.csv", index=False)
-test_df.to_csv("/teamspace/studios/this_studio/CTPA-CLIP/data/test_ctpa_metadata.csv", index=False)
+train_df.to_csv("C:/Users/STRATHMORE/Desktop/Sharon_Tonui/CTPA-CLIP/CTPA_CLIP/data/train_metadata.csv", index=False)
+test_df.to_csv("C:/Users/STRATHMORE/Desktop/Sharon_Tonui/CTPA-CLIP/CTPA_CLIP/data/test_metadata.csv", index=False)

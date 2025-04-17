@@ -10,6 +10,7 @@ import matplotlib.pyplot as plt
 from torch.utils.data import Dataset, DataLoader
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from peft import LoraConfig, get_peft_model
+from ct_clip.pretrained_model import ctclip
 
 # Import local modules
 from model_components import CTReportGenerator, RobustVisionFeatureExtractor, CrossAttentionLayer
@@ -313,9 +314,6 @@ def setup_training(train_data, val_data, save_path, batch_size=2, num_epochs=10,
     
     # Import CT-CLIP
     try:
-        import sys
-        sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-        from ct_clip.pretrained_model import ctclip
         vision_encoder = ctclip.visual_transformer
         logger.info("Loaded CT-CLIP vision encoder")
     except ImportError:

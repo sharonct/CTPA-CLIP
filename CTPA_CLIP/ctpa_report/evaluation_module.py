@@ -6,7 +6,7 @@ import logging
 import matplotlib.pyplot as plt
 from tqdm import tqdm
 from torch.utils.data import DataLoader
-from transformers import AutoTokenizer, AutoModel
+from transformers import AutoTokenizer
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, 
@@ -42,6 +42,7 @@ class NLGMetricsEvaluator:
             try:
                 nltk.data.find('tokenizers/punkt')
             except LookupError:
+
                 nltk.download('punkt')
             
             from rouge import Rouge

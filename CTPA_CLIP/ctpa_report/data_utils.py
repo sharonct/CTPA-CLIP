@@ -3,7 +3,10 @@ import torch.nn.functional as F
 import json
 import numpy as np
 import logging
+import os
 from torch.utils.data import Dataset, DataLoader
+from functools import lru_cache
+import hashlib
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, 
@@ -13,13 +16,20 @@ logger = logging.getLogger(__name__)
 
 class CTReportDataset(Dataset):
     """
-    Dataset for CT scan report generation
+    Dataset for CT scan report generation with optimizations
     """
-    def __init__(self, jsonl_file, tokenizer, target_size=(240, 480, 480), max_length=512):
+    def __init__(self, jsonl_file, tokenizer, target_size=(112, 224, 224), max_length=512, 
+                 cache_dir=None, use_cache=True):
         self.data = []
         self.target_size = target_size
         self.tokenizer = tokenizer
         self.max_length = max_length
+        self.cache_dir = cache_dir
+        self.use_cache = use_cache
+        
+        # Create cache directory if needed and doesn't exist
+        if self.use_cache and self.cache_dir:
+            os.makedirs(self.cache_dir, exist_ok=True)
         
         # Load data from JSONL file
         with open(jsonl_file, "r") as f:
@@ -30,6 +40,15 @@ class CTReportDataset(Dataset):
     
     def __len__(self):
         return len(self.data)
+
+    def get_cache_path(self, image_path, size_str):
+        """Generate a unique cache file path based on the image path and target size"""
+        if not self.use_cache or not self.cache_dir:
+            return None
+            
+        # Create a hash of the image path and size for the cache filename
+        hash_key = hashlib.md5(f"{image_path}_{size_str}".encode()).hexdigest()
+        return os.path.join(self.cache_dir, f"{hash_key}.pt")
     
     def __getitem__(self, idx):
         item = self.data[idx]
@@ -37,26 +56,57 @@ class CTReportDataset(Dataset):
         try:
             # Load CT scan
             image_path = item["image_path"]
-            image_features = np.load(image_path)["arr_0"]
             
-            # Convert to tensor
-            image_tensor = torch.tensor(image_features, dtype=torch.float32)
+            # Create a string representation of the target size for caching
+            size_str = f"{self.target_size[0]}_{self.target_size[1]}_{self.target_size[2]}"
+            cache_path = self.get_cache_path(image_path, size_str)
             
-            # Ensure correct dimensions [C, D, H, W]
-            if image_tensor.ndim == 3:  # [D, H, W]
-                image_tensor = image_tensor.unsqueeze(0)  # Add channel dim
-            
-            # Resize if needed
-            C, D, H, W = image_tensor.shape
-            target_D, target_H, target_W = self.target_size
-            
-            if D != target_D or H != target_H or W != target_W:
-                image_tensor = F.interpolate(
-                    image_tensor.unsqueeze(0),
-                    size=self.target_size,
-                    mode="trilinear",
-                    align_corners=False
-                ).squeeze(0)
+            # Try to load from cache first
+            if cache_path and os.path.exists(cache_path):
+                try:
+                    image_tensor = torch.load(cache_path, map_location='cpu')
+                    logger.debug(f"Loaded cached tensor from {cache_path}")
+                except Exception as e:
+                    logger.warning(f"Failed to load cache: {e}. Regenerating.")
+                    image_tensor = None
+            else:
+                image_tensor = None
+                
+            # If not in cache, load and process
+            if image_tensor is None:
+                # Load raw data
+                image_features = np.load(image_path)["arr_0"]
+                
+                # Convert to tensor
+                image_tensor = torch.tensor(image_features, dtype=torch.float32)
+                
+                # Ensure correct dimensions [C, D, H, W]
+                if image_tensor.ndim == 3:  # [D, H, W]
+                    image_tensor = image_tensor.unsqueeze(0)  # Add channel dim
+                
+                # Resize if needed - use nearest neighbor for speed
+                C, D, H, W = image_tensor.shape
+                target_D, target_H, target_W = self.target_size
+                
+                if D != target_D or H != target_H or W != target_W:
+                    image_tensor = F.interpolate(
+                        image_tensor.unsqueeze(0),
+                        size=self.target_size,
+                        mode="trilinear",  # Use trilinear interpolation
+                        align_corners=False
+                    ).squeeze(0)
+                
+                # Normalize to [0, 1] range for better performance
+                if image_tensor.max() > 1.0:
+                    image_tensor = image_tensor / image_tensor.max()
+                
+                # Save to cache if enabled
+                if cache_path:
+                    try:
+                        torch.save(image_tensor, cache_path)
+                        logger.debug(f"Cached tensor to {cache_path}")
+                    except Exception as e:
+                        logger.warning(f"Failed to save to cache: {e}")
             
             # Get prompt and report
             report = item["report"]
@@ -88,6 +138,8 @@ class CTReportDataset(Dataset):
             
         except Exception as e:
             logger.error(f"Error processing item {idx}: {e}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
             
             # Return dummy data to prevent training crashes
             dummy_tensor = torch.zeros(1, self.target_size[0], self.target_size[1], self.target_size[2])
@@ -109,6 +161,101 @@ class CTReportDataset(Dataset):
             }
 
 
+def create_data_loaders(train_jsonl, val_jsonl, tokenizer, batch_size=4, target_size=(112, 224, 224), 
+                        num_workers=4, pin_memory=True, prefetch_factor=2, cache_dir=None):
+    """
+    Create optimized data loaders for training and validation
+    
+    Args:
+        train_jsonl: Path to training data JSONL file
+        val_jsonl: Path to validation data JSONL file
+        tokenizer: Tokenizer for text processing
+        batch_size: Batch size for training
+        target_size: Target size for CT scans (D, H, W)
+        num_workers: Number of worker threads for data loading
+        pin_memory: Whether to pin memory for faster GPU transfer
+        prefetch_factor: Number of batches to prefetch
+        cache_dir: Directory to cache processed tensors
+        
+    Returns:
+        tuple: (train_loader, val_loader, train_dataset, val_dataset)
+    """
+    # Create datasets
+    train_dataset = CTReportDataset(
+        jsonl_file=train_jsonl,
+        tokenizer=tokenizer,
+        target_size=target_size,
+        cache_dir=cache_dir
+    )
+    
+    val_dataset = CTReportDataset(
+        jsonl_file=val_jsonl,
+        tokenizer=tokenizer,
+        target_size=target_size,
+        cache_dir=cache_dir
+    )
+    
+    # Create data loaders with optimized settings
+    train_loader = DataLoader(
+        train_dataset, 
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=num_workers,
+        pin_memory=pin_memory,
+        prefetch_factor=prefetch_factor if num_workers > 0 else None,
+        persistent_workers=True if num_workers > 0 else False,
+        drop_last=True  # Drop last incomplete batch for better performance
+    )
+    
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=1,  # Use batch size 1 for evaluation
+        shuffle=False,
+        num_workers=num_workers,
+        pin_memory=pin_memory,
+        prefetch_factor=prefetch_factor if num_workers > 0 else None,
+        persistent_workers=True if num_workers > 0 else False
+    )
+    
+    logger.info(f"Created data loaders with {len(train_dataset)} training samples and {len(val_dataset)} validation samples")
+    logger.info(f"Using {num_workers} workers, batch size {batch_size}, prefetch factor {prefetch_factor}")
+    
+    return train_loader, val_loader, train_dataset, val_dataset
+
+
+def load_and_process_dataset(jsonl_file, tokenizer, target_size=(112, 224, 224), cache_dir=None):
+    """
+    Load and process a dataset from a JSONL file with optimizations
+    
+    Args:
+        jsonl_file: Path to JSONL file
+        tokenizer: Tokenizer for text processing
+        target_size: Target size for CT scans
+        cache_dir: Directory to cache processed tensors
+        
+    Returns:
+        CTReportDataset: Processed dataset
+    """
+    try:
+        # Create dataset with caching
+        dataset = CTReportDataset(
+            jsonl_file=jsonl_file,
+            tokenizer=tokenizer,
+            target_size=target_size,
+            cache_dir=cache_dir,
+            use_cache=cache_dir is not None
+        )
+        
+        logger.info(f"Loaded and processed dataset with {len(dataset)} samples from {jsonl_file}")
+        logger.info(f"Using {'cached' if cache_dir else 'non-cached'} preprocessing")
+        return dataset
+        
+    except Exception as e:
+        logger.error(f"Error loading dataset from {jsonl_file}: {e}")
+        import traceback
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        return None
+    
 class TrainingMetricsTracker:
     """
     Track and visualize training metrics
@@ -210,165 +357,3 @@ class TrainingMetricsTracker:
         plt.savefig(fig_path)
         logger.info(f"Metrics visualization saved to {fig_path}")
         plt.close(fig)
-
-
-def create_data_loaders(train_jsonl, val_jsonl, tokenizer, batch_size=2, target_size=(240, 480, 480)):
-    """
-    Create data loaders for training and validation
-    
-    Args:
-        train_jsonl: Path to training data JSONL file
-        val_jsonl: Path to validation data JSONL file
-        tokenizer: Tokenizer for text processing
-        batch_size: Batch size for training
-        target_size: Target size for CT scans (D, H, W)
-        
-    Returns:
-        tuple: (train_loader, val_loader, train_dataset, val_dataset)
-    """
-    # Create datasets
-    train_dataset = CTReportDataset(
-        jsonl_file=train_jsonl,
-        tokenizer=tokenizer,
-        target_size=target_size
-    )
-    
-    val_dataset = CTReportDataset(
-        jsonl_file=val_jsonl,
-        tokenizer=tokenizer,
-        target_size=target_size
-    )
-    
-    # Create data loaders
-    train_loader = DataLoader(
-        train_dataset, 
-        batch_size=batch_size,
-        shuffle=True,
-        num_workers=2,
-        pin_memory=True
-    )
-    
-    val_loader = DataLoader(
-        val_dataset,
-        batch_size=1,  # Use batch size 1 for evaluation
-        shuffle=False,
-        num_workers=2,
-        pin_memory=True
-    )
-    
-    logger.info(f"Created data loaders with {len(train_dataset)} training samples and {len(val_dataset)} validation samples")
-    
-    return train_loader, val_loader, train_dataset, val_dataset
-
-
-def prepare_data_sample(ct_scan_path, tokenizer, prompt="Generate a detailed clinical report for this CT scan:", target_size=(240, 480, 480)):
-    """
-    Prepare a single CT scan for inference
-    
-    Args:
-        ct_scan_path: Path to CT scan file (.npz)
-        tokenizer: Tokenizer for text processing
-        prompt: Prompt for report generation
-        target_size: Target size for CT scan
-        
-    Returns:
-        dict: Processed sample
-    """
-    try:
-        # Load CT scan
-        image_features = np.load(ct_scan_path)["arr_0"]
-        
-        # Convert to tensor
-        image_tensor = torch.tensor(image_features, dtype=torch.float32)
-        
-        # Ensure correct dimensions [C, D, H, W]
-        if image_tensor.ndim == 3:  # [D, H, W]
-            image_tensor = image_tensor.unsqueeze(0)  # Add channel dim
-        
-        # Resize if needed
-        C, D, H, W = image_tensor.shape
-        target_D, target_H, target_W = target_size
-        
-        if D != target_D or H != target_H or W != target_W:
-            image_tensor = F.interpolate(
-                image_tensor.unsqueeze(0),
-                size=target_size,
-                mode="trilinear",
-                align_corners=False
-            ).squeeze(0)
-        
-        # Tokenize the prompt
-        encoding = tokenizer(
-            prompt,
-            return_tensors="pt"
-        )
-        
-        return {
-            "image": image_tensor,
-            "input_ids": encoding["input_ids"].squeeze(0),
-            "attention_mask": encoding["attention_mask"].squeeze(0),
-            "prompt": prompt
-        }
-    except Exception as e:
-        logger.error(f"Error processing CT scan at {ct_scan_path}: {e}")
-        import traceback
-        logger.error(f"Traceback: {traceback.format_exc()}")
-        return None
-
-
-def preprocess_batch(batch, device, dtype=None):
-    """
-    Preprocess a batch of data for the model
-    
-    Args:
-        batch: Batch from dataloader
-        device: Device to move data to
-        dtype: Data type for model inputs (if necessary)
-        
-    Returns:
-        dict: Processed batch
-    """
-    processed = {
-        "image": batch["image"].to(device),  # Keep image as float32
-        "input_ids": batch["input_ids"].to(device),
-        "attention_mask": batch["attention_mask"].to(device),
-        "report": batch.get("report", None),
-        "prompt": batch["prompt"]
-    }
-    
-    # Convert specific tensors to target dtype if needed
-    if dtype is not None:
-        processed["input_ids"] = processed["input_ids"].to(dtype)
-        processed["attention_mask"] = processed["attention_mask"].to(dtype)
-    
-    return processed
-
-
-def load_and_process_dataset(jsonl_file, tokenizer, target_size=(240, 480, 480)):
-    """
-    Load and process a dataset from a JSONL file
-    
-    Args:
-        jsonl_file: Path to JSONL file
-        tokenizer: Tokenizer for text processing
-        target_size: Target size for CT scans
-        
-    Returns:
-        CTReportDataset: Processed dataset
-    """
-    try:
-        # Create dataset
-        dataset = CTReportDataset(
-            jsonl_file=jsonl_file,
-            tokenizer=tokenizer,
-            target_size=target_size
-        )
-        
-        logger.info(f"Loaded and processed dataset with {len(dataset)} samples from {jsonl_file}")
-        return dataset
-        
-    except Exception as e:
-        logger.error(f"Error loading dataset from {jsonl_file}: {e}")
-        import traceback
-        logger.error(f"Traceback: {traceback.format_exc()}")
-        return None

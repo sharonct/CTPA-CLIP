@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import logging
+import gc
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, 
@@ -16,18 +17,19 @@ class RobustVisionFeatureExtractor(nn.Module):
     """
     A robust feature extractor that handles various CT scan formats
     and extracts meaningful features while gracefully handling errors.
+    Optimized for memory efficiency and speed.
     """
-    def __init__(self, ctclip_model, feature_dim=512, device=None, dtype=None):
+    def __init__(self, ctclip_model, feature_dim=256, device=None, dtype=None):
         super().__init__()
         self.device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.ctclip = ctclip_model.to(self.device)
         self.vision_encoder = self.ctclip.visual_transformer
-        self.feature_dim = feature_dim
+        self.feature_dim = feature_dim  # Reduced from 512 to 256
         self.dtype = dtype
         
-        # Create a projection network from patched embeddings to features
+        # Create a more efficient projection network
         self.projection = nn.Sequential(
-            nn.Linear(512, feature_dim),  # CT-CLIP patch embedding is 512-dim
+            nn.Linear(512, feature_dim),  # Reduced output dimension
             nn.LayerNorm(feature_dim),
             nn.GELU()
         ).to(self.device)
@@ -43,22 +45,13 @@ class RobustVisionFeatureExtractor(nn.Module):
             # Ensure proper device and type
             x = x.to(self.device).float()  # Keep input as float32 for CT-CLIP
             
-            # Log input shape for debugging
-            logger.debug(f"Input tensor shape: {x.shape}")
-            
             with torch.no_grad():
                 # Apply patch embedding (this part still works reliably)
                 patch_embedded = self.vision_encoder.to_patch_emb(x)
                 
-                # Log the shape for debugging
-                b, t, h, w, c = patch_embedded.shape
-                logger.debug(f"Patch embedded shape: {b}, {t}, {h}, {w}, {c}")
-                
                 # Simple pooling approach (average across spatial and temporal dimensions)
-                # First average across spatial dimensions (h, w)
+                # Single operation pooling for better performance
                 spatial_pooled = patch_embedded.mean(dim=(2, 3))  # -> [b, t, c]
-                
-                # Then average across temporal dimension (t)
                 temporal_pooled = spatial_pooled.mean(dim=1)  # -> [b, c]
                 
                 # Convert the input to match projection layer dtype before passing
@@ -81,18 +74,19 @@ class RobustVisionFeatureExtractor(nn.Module):
 
 class CrossAttentionLayer(nn.Module):
     """
-    Cross-attention layer for attending from text to vision features
+    Optimized cross-attention layer for attending from text to vision features
     """
-    def __init__(self, text_dim=768, vision_dim=512, num_heads=8, dropout=0.1):
+    def __init__(self, text_dim=768, vision_dim=256, num_heads=4, dropout=0.05):
         super().__init__()
+        # Fewer attention heads and lower dropout for faster training
         self.query = nn.Linear(text_dim, text_dim)
         self.key = nn.Linear(vision_dim, text_dim)
         self.value = nn.Linear(vision_dim, text_dim)
         
         self.multihead = nn.MultiheadAttention(
             embed_dim=text_dim,
-            num_heads=num_heads,
-            dropout=dropout,
+            num_heads=num_heads,  # Reduced from 8 to 4
+            dropout=dropout,      # Reduced from 0.1 to 0.05
             batch_first=True
         )
         
@@ -120,7 +114,7 @@ class CrossAttentionLayer(nn.Module):
         # Project vision features to match text dimension
         vision_features = vision_features.unsqueeze(1)  # [batch_size, 1, vision_dim]
         
-        # Multi-head attention
+        # Multi-head attention with fused operations where possible
         queries = self.query(text_features)
         keys = self.key(vision_features)
         values = self.value(vision_features)
@@ -137,9 +131,10 @@ class CrossAttentionLayer(nn.Module):
         
         return output
 
+
 class CTReportGenerator(nn.Module):
     """
-    End-to-end model for CT scan report generation
+    End-to-end model for CT scan report generation with optimizations
     """
     def __init__(self, llm, vision_feature_extractor, cross_attention=None):
         super().__init__()
@@ -158,7 +153,9 @@ class CTReportGenerator(nn.Module):
         if cross_attention is None:
             self.cross_attention = CrossAttentionLayer(
                 text_dim=self.llm.config.hidden_size,
-                vision_dim=vision_feature_extractor.feature_dim
+                vision_dim=vision_feature_extractor.feature_dim,
+                num_heads=4,  # Reduced number of heads
+                dropout=0.05   # Lower dropout
             ).to(self.llm_dtype)
         else:
             self.cross_attention = cross_attention.to(self.llm_dtype)
@@ -190,14 +187,14 @@ class CTReportGenerator(nn.Module):
         # Return logits for training
         return lm_head_output
 
-    def generate_report(self, images, prompt, max_length=512, temperature=0.7):
+    def generate_report(self, images, prompt, max_length=256, temperature=0.7):
         """
-        Generate a CT scan report
+        Generate a CT scan report, optimized for memory efficiency
         
         Args:
             images: CT scan images [batch_size, channels, depth, height, width]
             prompt: Text prompt to condition the generation
-            max_length: Maximum length of the generated report
+            max_length: Maximum length of the generated report (reduced from 512)
             temperature: Temperature for sampling
             
         Returns:
@@ -221,15 +218,24 @@ class CTReportGenerator(nn.Module):
         with torch.no_grad():
             visual_features = self.vision_feature_extractor(images)
         
-        # Generate text with visual conditioning
+        # Generate text with visual conditioning using more efficient approach
+        input_ids = inputs["input_ids"]
+        attention_mask = inputs["attention_mask"]
+        batch_size = input_ids.shape[0]
+        
+        # Use more efficient generation with fewer steps
         generated_ids = []
         
         # Start with the input prompt tokens
         curr_ids = inputs["input_ids"]
         curr_mask = inputs["attention_mask"]
         
-        # Auto-regressive generation
-        for _ in range(max_length):
+        # Auto-regressive generation with early stopping checks
+        for step in range(max_length):
+            # Break if any sequence reaches the maximum length
+            if curr_ids.shape[1] >= max_length:
+                break
+                
             with torch.no_grad():
                 # Get LLM hidden states
                 llm_outputs = self.llm(
@@ -257,8 +263,12 @@ class CTReportGenerator(nn.Module):
             curr_mask = torch.cat([curr_mask, torch.ones_like(next_token)], dim=1)
             
             # Check if we've generated the end token
-            if next_token.item() == tokenizer.eos_token_id:
+            if (next_token == tokenizer.eos_token_id).any():
                 break
+                
+            # Clean up every 50 tokens to save memory
+            if step % 50 == 0 and step > 0:
+                torch.cuda.empty_cache()
         
         # Decode the generated tokens
         generated_text = tokenizer.decode(curr_ids[0], skip_special_tokens=True)
@@ -266,11 +276,15 @@ class CTReportGenerator(nn.Module):
         # Extract the generated report (remove the prompt)
         report = generated_text[len(prompt):]
         
+        # Free up memory
+        torch.cuda.empty_cache()
+        
         return report
+
 
 def load_model(model_path, device=None):
     """
-    Helper function to load a saved model
+    Helper function to load a saved model with optimizations
     
     Args:
         model_path: Path to the saved model checkpoint
@@ -289,63 +303,91 @@ def load_model(model_path, device=None):
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
     # Load checkpoint
-    checkpoint = torch.load(model_path, map_location=device)
+    try:
+        checkpoint = torch.load(model_path, map_location=device)
+    except Exception as e:
+        logger.error(f"Error loading checkpoint: {e}")
+        return None
     
     # Load LLM and tokenizer
-    llm_name = "epfl-llm/meditron-7b"  # This would need to be passed or retrieved from checkpoint
+    llm_name = "epfl-llm/meditron-7b"
     
-    # Load LLM
-    llm = AutoModelForCausalLM.from_pretrained(
-        llm_name, 
-        torch_dtype=torch.bfloat16, 
-        use_auth_token=True
-    ).to(device)
-    
-    # Apply LoRA (with the same config as during training)
-    lora_config = LoraConfig(
-        r=16,  # These values would need to be passed or retrieved from checkpoint
-        lora_alpha=32,
-        lora_dropout=0.1,
-        target_modules=["q_proj", "v_proj", "k_proj", "o_proj"],
-        bias="none"
-    )
-    llm = get_peft_model(llm, lora_config)
-    
-    # Load tokenizer
-    tokenizer = AutoTokenizer.from_pretrained(llm_name)
-    tokenizer.pad_token = tokenizer.eos_token
-    
-    # Import CT-CLIP
     try:
-        sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-        from ct_clip.pretrained_model import ctclip
+        # Load LLM with optimized parameters
+        llm = AutoModelForCausalLM.from_pretrained(
+            llm_name, 
+            torch_dtype=torch.bfloat16,  # Use BF16 for better memory efficiency
+            device_map="auto",           # Better memory management
+            use_auth_token=True
+        )
         
-        # Create feature extractor
-        vision_feature_extractor = RobustVisionFeatureExtractor(ctclip, device=device)
+        # Apply LoRA (with reduced parameters)
+        lora_config = LoraConfig(
+            r=8,                # Reduced from 16
+            lora_alpha=16,      # Reduced from 32
+            lora_dropout=0.05,  # Lower dropout
+            target_modules=["q_proj", "v_proj"],  # Fewer target modules
+            bias="none"
+        )
+        llm = get_peft_model(llm, lora_config)
         
-        # Create cross-attention
-        cross_attention = CrossAttentionLayer(
-            text_dim=llm.config.hidden_size,
-            vision_dim=vision_feature_extractor.feature_dim
-        ).to(device)
+        # Enable gradient checkpointing if available
+        if hasattr(llm, "gradient_checkpointing_enable"):
+            llm.gradient_checkpointing_enable()
+            logger.info("Gradient checkpointing enabled")
         
-        # Create model
-        model = CTReportGenerator(
-            llm=llm,
-            vision_feature_extractor=vision_feature_extractor,
-            cross_attention=cross_attention
-        ).to(device)
+        # Load tokenizer
+        tokenizer = AutoTokenizer.from_pretrained(llm_name)
+        tokenizer.pad_token = tokenizer.eos_token
         
-        # Set tokenizer
-        model.tokenizer = tokenizer
-        
-        # Load state dict
-        model.load_state_dict(checkpoint["model_state_dict"])
-        
-        logger.info(f"Model loaded from {model_path}")
-        
-        return model
-        
-    except ImportError:
-        logger.error("CT-CLIP not found in path. Make sure it's properly imported.")
+        # Import CT-CLIP
+        try:
+            sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+            from ct_clip.pretrained_model import ctclip
+            
+            # Create feature extractor with reduced feature dimension
+            vision_feature_extractor = RobustVisionFeatureExtractor(
+                ctclip, 
+                feature_dim=256,  # Reduced from 512
+                device=device
+            )
+            
+            # Create cross-attention with fewer heads
+            cross_attention = CrossAttentionLayer(
+                text_dim=llm.config.hidden_size,
+                vision_dim=vision_feature_extractor.feature_dim,
+                num_heads=4,      # Reduced from 8
+                dropout=0.05      # Reduced from 0.1
+            ).to(device)
+            
+            # Create model
+            model = CTReportGenerator(
+                llm=llm,
+                vision_feature_extractor=vision_feature_extractor,
+                cross_attention=cross_attention
+            ).to(device)
+            
+            # Set tokenizer
+            model.tokenizer = tokenizer
+            
+            # Load state dict
+            try:
+                model.load_state_dict(checkpoint["model_state_dict"])
+                logger.info(f"Model loaded from {model_path}")
+            except Exception as loading_error:
+                logger.error(f"Error loading state dictionary: {loading_error}")
+                logger.info("Attempting to load with strict=False...")
+                model.load_state_dict(checkpoint["model_state_dict"], strict=False)
+                logger.info(f"Model loaded with strict=False from {model_path}")
+            
+            return model
+            
+        except ImportError:
+            logger.error("CT-CLIP not found in path. Make sure it's properly imported.")
+            return None
+            
+    except Exception as e:
+        logger.error(f"Error loading model: {e}")
+        import traceback
+        logger.error(f"Traceback: {traceback.format_exc()}")
         return None

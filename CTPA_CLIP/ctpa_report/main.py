@@ -91,14 +91,30 @@ def main():
         # Training
         "train_data_path": "C:/Users/STRATHMORE/Desktop/Sharon_Tonui/CTPA-CLIP/CTPA_CLIP/data/train_dataset.jsonl",
         "test_data_path": "C:/Users/STRATHMORE/Desktop/Sharon_Tonui/CTPA-CLIP/CTPA_CLIP/data/test_dataset.jsonl",
-        "batch_size": 2,
-        "num_epochs": 10,
+        "batch_size": 4,
+        "num_epochs": 5,
         "val_ratio": 0.1,
-        "learning_rate": 2e-5,
-        "cross_attention_lr": 1e-4,
+        "learning_rate": 5e-5,
+        "cross_attention_lr": 2e-4,
         "lora_r": 16,
         "lora_alpha": 32,
-        "eval_frequency": 2,  # Evaluate every N epochs
+        "accumulation_steps": 2,
+        "eval_frequency": 1,
+        "eval_samples": 10,  
+
+        # Optimization
+        "use_mixed_precision": True,
+        "fp16_opt_level": "O2",     
+
+        "num_workers": 4,
+        "pin_memory": True,
+        "prefetch_factor": 2,
+
+        "max_grad_norm": 1.0,
+        "gradient_checkpointing": True,
+
+        "cache_preprocessed": True,
+        "cache_dir": "C:/Users/STRATHMORE/Desktop/Sharon_Tonui/CTPA-CLIP/CTPA_CLIP/cache",
 
         # Evaluation
         "model_path": "C:/Users/STRATHMORE/Desktop/Sharon_Tonui/CTPA-CLIP/CTPA_CLIP/models/ct_report/best_model_by_validation.pt",
@@ -107,6 +123,8 @@ def main():
         
         # Data
         "target_size": (240, 480, 480),
+        # "target_size": (112, 224, 224),
+
     }
     
     # Run in the specified mode

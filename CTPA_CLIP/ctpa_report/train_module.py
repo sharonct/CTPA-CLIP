@@ -1,20 +1,10 @@
-import os
+
 import torch
 import torch.nn as nn
-import torch.optim as optim
-import json
-import numpy as np
 import torch.nn.functional as F
 import logging
-import matplotlib.pyplot as plt
-from torch.utils.data import Dataset, DataLoader
-from transformers import AutoModelForCausalLM, AutoTokenizer
-from peft import LoraConfig, get_peft_model
-from ct_clip.pretrained_model import ctclip
+import gc
 
-# Import local modules
-from model_components import CTReportGenerator, RobustVisionFeatureExtractor, CrossAttentionLayer
-from data_utils import CTReportDataset, TrainingMetricsTracker
 # Setup logging
 logging.basicConfig(level=logging.INFO, 
                     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -22,386 +12,383 @@ logger = logging.getLogger(__name__)
 
 # Device setup
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-logger.info(f"Using device: {device}")
 
 
-def train_report_generator(model, train_dataset, optimizer, scheduler, 
-                          test_dataset=None, eval_frequency=2, num_epochs=5, 
-                          batch_size=2, save_path="./models/ct_report",
-                          vision_encoder=None, evaluator=None):
+class RobustVisionFeatureExtractor(nn.Module):
     """
-    Train the CT report generator with metrics tracking and periodic evaluation
+    A robust feature extractor that handles various CT scan formats
+    and extracts meaningful features while gracefully handling errors.
+    Optimized for memory efficiency and speed.
+    """
+    def __init__(self, ctclip_model, feature_dim=256, device=None, dtype=None):
+        super().__init__()
+        self.device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.ctclip = ctclip_model.to(self.device)
+        self.vision_encoder = self.ctclip.visual_transformer
+        self.feature_dim = feature_dim  # Reduced from 512 to 256
+        self.dtype = dtype
+        
+        # Create a more efficient projection network
+        self.projection = nn.Sequential(
+            nn.Linear(512, feature_dim),  # Reduced output dimension
+            nn.LayerNorm(feature_dim),
+            nn.GELU()
+        ).to(self.device)
+        
+        # Convert to specified dtype if provided
+        if dtype is not None:
+            self.projection = self.projection.to(dtype)
+        
+        logger.info(f"Initialized RobustVisionFeatureExtractor with output dim={feature_dim}")
+    
+    def forward(self, x):
+        try:
+            # Ensure proper device and type
+            x = x.to(self.device).float()  # Keep input as float32 for CT-CLIP
+            
+            with torch.no_grad():
+                # Apply patch embedding (this part still works reliably)
+                patch_embedded = self.vision_encoder.to_patch_emb(x)
+                
+                # Simple pooling approach (average across spatial and temporal dimensions)
+                # Single operation pooling for better performance
+                spatial_pooled = patch_embedded.mean(dim=(2, 3))  # -> [b, t, c]
+                temporal_pooled = spatial_pooled.mean(dim=1)  # -> [b, c]
+                
+                # Convert the input to match projection layer dtype before passing
+                if self.dtype is not None:
+                    temporal_pooled = temporal_pooled.to(dtype=self.dtype)
+                
+                # Project to feature dimension
+                features = self.projection(temporal_pooled)
+                
+                return features
+            
+        except Exception as e:
+            logger.error(f"Error in RobustVisionFeatureExtractor: {e}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
+            # Return placeholder features in case of error
+            return torch.randn(x.size(0), self.feature_dim, device=self.device, 
+                              dtype=self.dtype if self.dtype is not None else torch.float32)
+
+
+class CrossAttentionLayer(nn.Module):
+    """
+    Optimized cross-attention layer for attending from text to vision features
+    """
+    def __init__(self, text_dim=768, vision_dim=256, num_heads=4, dropout=0.05):
+        super().__init__()
+        # Fewer attention heads and lower dropout for faster training
+        self.query = nn.Linear(text_dim, text_dim)
+        self.key = nn.Linear(vision_dim, text_dim)
+        self.value = nn.Linear(vision_dim, text_dim)
+        
+        self.multihead = nn.MultiheadAttention(
+            embed_dim=text_dim,
+            num_heads=num_heads,  # Reduced from 8 to 4
+            dropout=dropout,      # Reduced from 0.1 to 0.05
+            batch_first=True
+        )
+        
+        self.norm = nn.LayerNorm(text_dim)
+        self.dropout = nn.Dropout(dropout)
+    
+    def forward(self, text_features, vision_features):
+        """
+        Args:
+            text_features: [batch_size, seq_len, text_dim]
+            vision_features: [batch_size, vision_dim]
+        """
+        # Ensure consistent dtype - convert vision features to match text features
+        text_dtype = text_features.dtype
+        vision_features = vision_features.to(dtype=text_dtype)
+        
+        # Make sure all layer parameters match the input dtype
+        if self.query.weight.dtype != text_dtype:
+            self.query = self.query.to(dtype=text_dtype)
+            self.key = self.key.to(dtype=text_dtype)
+            self.value = self.value.to(dtype=text_dtype)
+            self.multihead = self.multihead.to(dtype=text_dtype)
+            self.norm = self.norm.to(dtype=text_dtype)
+            
+        # Project vision features to match text dimension
+        vision_features = vision_features.unsqueeze(1)  # [batch_size, 1, vision_dim]
+        
+        # Multi-head attention with fused operations where possible
+        queries = self.query(text_features)
+        keys = self.key(vision_features)
+        values = self.value(vision_features)
+        
+        # Apply attention
+        attn_output, _ = self.multihead(
+            query=queries,
+            key=keys,
+            value=values
+        )
+        
+        # Add residual connection and normalize
+        output = self.norm(text_features + self.dropout(attn_output))
+        
+        return output
+
+
+class CTReportGenerator(nn.Module):
+    """
+    End-to-end model for CT scan report generation with optimizations
+    """
+    def __init__(self, llm, vision_feature_extractor, cross_attention=None):
+        super().__init__()
+        self.llm = llm
+        self.vision_feature_extractor = vision_feature_extractor
+        self.tokenizer = None  # Will be set after initialization
+        
+        # Determine the LLM dtype for consistency
+        self.llm_dtype = next(llm.parameters()).dtype
+        logger.info(f"LLM is using dtype: {self.llm_dtype}")
+        
+        # Convert vision feature extractor to match
+        vision_feature_extractor.projection = vision_feature_extractor.projection.to(dtype=self.llm_dtype)
+        
+        # Create cross-attention if not provided
+        if cross_attention is None:
+            self.cross_attention = CrossAttentionLayer(
+                text_dim=self.llm.config.hidden_size,
+                vision_dim=vision_feature_extractor.feature_dim,
+                num_heads=4,  # Reduced number of heads
+                dropout=0.05   # Lower dropout
+            ).to(self.llm_dtype)
+        else:
+            self.cross_attention = cross_attention.to(self.llm_dtype)
+    
+    def forward(self, images, input_ids, attention_mask):
+        """
+        Forward pass for training
+        """
+        # Extract visual features - convert to LLM dtype
+        visual_features = self.vision_feature_extractor(images).to(dtype=self.llm_dtype)
+        
+        # Get LLM hidden states for the prompt
+        llm_outputs = self.llm(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            output_hidden_states=True,
+            return_dict=True
+        )
+        
+        # Access hidden states
+        last_hidden_state = llm_outputs.hidden_states[-1]
+        
+        # Apply cross-attention between visual features and text features
+        cross_attn_output = self.cross_attention(last_hidden_state, visual_features)
+        
+        # Prepare for generation (replace the original hidden states)
+        lm_head_output = self.llm.lm_head(cross_attn_output)
+        
+        # Return logits for training
+        return lm_head_output
+
+    def generate_report(self, images, prompt, max_length=256, temperature=0.7):
+        """
+        Generate a CT scan report, optimized for memory efficiency
+        
+        Args:
+            images: CT scan images [batch_size, channels, depth, height, width]
+            prompt: Text prompt to condition the generation
+            max_length: Maximum length of the generated report (reduced from 512)
+            temperature: Temperature for sampling
+            
+        Returns:
+            str: Generated report
+        """
+        if self.tokenizer is None:
+            raise ValueError("Tokenizer not set. Please set the tokenizer before generation.")
+            
+        device = images.device
+        tokenizer = self.tokenizer
+        
+        # Tokenize the prompt
+        inputs = tokenizer(
+            prompt,
+            return_tensors="pt",
+            padding=True,
+            truncation=True
+        ).to(device)
+        
+        # Extract visual features
+        with torch.no_grad():
+            visual_features = self.vision_feature_extractor(images)
+        
+        # Generate text with visual conditioning using more efficient approach
+        input_ids = inputs["input_ids"]
+        attention_mask = inputs["attention_mask"]
+        batch_size = input_ids.shape[0]
+        
+        # Use more efficient generation with fewer steps
+        generated_ids = []
+        
+        # Start with the input prompt tokens
+        curr_ids = inputs["input_ids"]
+        curr_mask = inputs["attention_mask"]
+        
+        # Auto-regressive generation with early stopping checks
+        for step in range(max_length):
+            # Break if any sequence reaches the maximum length
+            if curr_ids.shape[1] >= max_length:
+                break
+                
+            with torch.no_grad():
+                # Get LLM hidden states
+                llm_outputs = self.llm(
+                    input_ids=curr_ids,
+                    attention_mask=curr_mask,
+                    output_hidden_states=True,
+                    return_dict=True
+                )
+                
+                # Get the last hidden state
+                last_hidden_state = llm_outputs.hidden_states[-1]
+                
+                # Apply cross-attention
+                cross_attn_output = self.cross_attention(last_hidden_state, visual_features)
+                
+                # Get next token logits (from the last position)
+                next_token_logits = self.llm.lm_head(cross_attn_output)[:, -1, :] / temperature
+                
+                # Sample from the distribution
+                probs = torch.softmax(next_token_logits, dim=-1)
+                next_token = torch.multinomial(probs, num_samples=1)
+            
+            # Append the generated token
+            curr_ids = torch.cat([curr_ids, next_token], dim=1)
+            curr_mask = torch.cat([curr_mask, torch.ones_like(next_token)], dim=1)
+            
+            # Check if we've generated the end token
+            if (next_token == tokenizer.eos_token_id).any():
+                break
+                
+            # Clean up every 50 tokens to save memory
+            if step % 50 == 0 and step > 0:
+                torch.cuda.empty_cache()
+        
+        # Decode the generated tokens
+        generated_text = tokenizer.decode(curr_ids[0], skip_special_tokens=True)
+        
+        # Extract the generated report (remove the prompt)
+        report = generated_text[len(prompt):]
+        
+        # Free up memory
+        torch.cuda.empty_cache()
+        
+        return report
+
+
+def load_model(model_path, device=None):
+    """
+    Helper function to load a saved model with optimizations
     
     Args:
-        model: CT report generator model
-        train_dataset: Dataset for training
-        optimizer: Optimizer for training
-        scheduler: Learning rate scheduler
-        test_dataset: Dataset for evaluation (optional)
-        eval_frequency: Evaluate every N epochs
-        num_epochs: Number of training epochs
-        batch_size: Batch size for training
-        save_path: Path to save the model
-        vision_encoder: Vision encoder for evaluation
-        evaluator: NLGMetricsEvaluator instance (optional)
+        model_path: Path to the saved model checkpoint
+        device: Device to load the model to
         
     Returns:
-        tuple: (best_model_path, metrics_tracker)
+        CTReportGenerator: Loaded model
     """
-    # Create dataloaders
-    train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-    
-    # Create evaluation dataloader if evaluation dataset is provided
-    if test_dataset and evaluator is None:
-        from evaluation_module import NLGMetricsEvaluator
-        test_dataloader = DataLoader(test_dataset, batch_size=1, shuffle=False)
-        evaluator = NLGMetricsEvaluator(model, vision_encoder, test_dataloader, device=device)
-    
-    # Initialize metrics tracker
-    metrics_tracker = TrainingMetricsTracker(save_dir=os.path.join(save_path, "metrics"))
-    
-    # Prepare for training
-    model.train()
-    
-    # Track global batch index and best model
-    global_batch_idx = 0
-    best_model_path = None
-    best_val_score = -float('inf')
-    best_loss = float('inf')
-    
-    # Ensure save directory exists
-    os.makedirs(save_path, exist_ok=True)
-    
-    # Training loop
-    for epoch in range(num_epochs):
-        epoch_loss = 0
-        batch_count = 0
-        
-        for batch_idx, batch in enumerate(train_dataloader):
-            # Move data to device
-            images = batch["image"].to(device)
-            input_ids = batch["input_ids"].to(device)
-            attention_mask = batch["attention_mask"].to(device)
-            
-            # Prepare labels for causal language modeling
-            # Labels are the input_ids shifted right
-            labels = input_ids.clone()
-            labels[:, :-1] = input_ids[:, 1:]
-            labels[:, -1] = -100  # Ignore the last token
-            
-            # Zero gradients
-            optimizer.zero_grad()
-            
-            try:
-                # Forward pass
-                logits = model(images, input_ids, attention_mask)
-                
-                # Compute loss
-                loss_fn = nn.CrossEntropyLoss(ignore_index=-100)
-                loss = loss_fn(logits.view(-1, logits.size(-1)), labels.view(-1))
-                
-                # Backward pass
-                loss.backward()
-                
-                # Gradient clipping
-                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-                
-                # Update parameters
-                optimizer.step()
-                
-                # Get current learning rate
-                current_lr = scheduler.get_last_lr()[0]
-                
-                # Update learning rate scheduler (if it's not epoch-based)
-                if not isinstance(scheduler, torch.optim.lr_scheduler.LambdaLR):
-                    scheduler.step()
-                
-                # Track metrics
-                metrics_tracker.update_batch_loss(global_batch_idx, loss.item(), current_lr)
-                global_batch_idx += 1
-                
-                # Log progress
-                if batch_idx % 10 == 0:
-                    logger.info(f"Epoch {epoch+1}/{num_epochs}, Batch {batch_idx}/{len(train_dataloader)}, "
-                               f"Loss: {loss.item():.4f}, LR: {current_lr:.6f}")
-                
-                # Accumulate epoch loss
-                epoch_loss += loss.item()
-                batch_count += 1
-                
-            except Exception as e:
-                logger.error(f"Error in training step: {e}")
-                import traceback
-                logger.error(f"Traceback: {traceback.format_exc()}")
-                continue
-        
-        # Calculate average epoch loss
-        avg_epoch_loss = epoch_loss / batch_count if batch_count > 0 else float('inf')
-        logger.info(f"Epoch {epoch+1}/{num_epochs} completed, Average Loss: {avg_epoch_loss:.4f}")
-        
-        # Update epoch metrics
-        is_best_loss = metrics_tracker.update_epoch_loss(epoch, avg_epoch_loss)
-        
-        # Update learning rate scheduler (if it's epoch-based)
-        if isinstance(scheduler, (torch.optim.lr_scheduler.StepLR, 
-                                 torch.optim.lr_scheduler.MultiStepLR,
-                                 torch.optim.lr_scheduler.ExponentialLR,
-                                 torch.optim.lr_scheduler.CosineAnnealingLR)):
-            scheduler.step()
-        
-        # Only save model if loss has improved
-        if avg_epoch_loss < best_loss:
-            best_loss = avg_epoch_loss
-            best_loss_path = os.path.join(save_path, "best_model_by_loss.pt")
-            
-            logger.info(f"New best loss: {avg_epoch_loss:.4f}. Saving model...")
-            
-            torch.save({
-                "model_state_dict": model.state_dict(),
-                "optimizer_state_dict": optimizer.state_dict(),
-                "scheduler_state_dict": scheduler.state_dict(),
-                "epoch": epoch,
-                "loss": avg_epoch_loss
-            }, best_loss_path)
-            
-            logger.info(f"Best model (by loss) saved to {best_loss_path}")
-            
-            # If no validation data, use the best loss model as the overall best
-            if test_dataset is None:
-                best_model_path = best_loss_path
-        
-        # Evaluation step (if test_dataset is provided)
-        if test_dataset and evaluator and (epoch + 1) % eval_frequency == 0:
-            logger.info(f"Running evaluation after epoch {epoch+1}...")
-            
-            # Switch to evaluation mode
-            model.eval()
-            
-            # Run evaluation
-            eval_results = evaluator.evaluate(max_samples=50)  # Limit for faster evaluation
-            
-            # Log evaluation metrics
-            logger.info(f"Evaluation results after epoch {epoch+1}:")
-            for metric_name, metric_value in eval_results['metrics'].items():
-                logger.info(f"  {metric_name}: {metric_value:.4f}")
-            
-            # Calculate an average score (using ROUGE-L and BERTScore F1 if available)
-            if 'bert_f1' in eval_results['metrics']:
-                val_score = (eval_results['metrics']['rougeL_score'] + 
-                           eval_results['metrics']['bert_f1']) / 2
-            else:
-                val_score = eval_results['metrics']['rougeL_score']
-            
-            # Check if this is the best model by validation score
-            if val_score > best_val_score:
-                best_val_score = val_score
-                best_val_model_path = os.path.join(save_path, "best_model_by_validation.pt")
-                
-                logger.info(f"New best validation score: {val_score:.4f}. Saving model...")
-                
-                torch.save({
-                    "model_state_dict": model.state_dict(),
-                    "optimizer_state_dict": optimizer.state_dict(),
-                    "scheduler_state_dict": scheduler.state_dict(),
-                    "epoch": epoch,
-                    "val_score": val_score,
-                    "loss": avg_epoch_loss
-                }, best_val_model_path)
-                
-                logger.info(f"Best model (by validation) saved to {best_val_model_path}")
-                
-                # Update the best overall model path
-                best_model_path = best_val_model_path
-            
-            # Save evaluation results
-            eval_save_path = os.path.join(save_path, "metrics", f"eval_epoch_{epoch+1}.json")
-            os.makedirs(os.path.dirname(eval_save_path), exist_ok=True)
-            with open(eval_save_path, 'w') as f:
-                json.dump(eval_results, f, indent=2)
-            
-            # Switch back to training mode
-            model.train()
-        
-        # Save and visualize metrics after each epoch
-        metrics_tracker.save_metrics()
-        metrics_tracker.visualize_metrics()
-    
-    # Final metrics save and visualization
-    metrics_tracker.save_metrics()
-    metrics_tracker.visualize_metrics()
-    
-    logger.info(f"Training completed. Best model saved at: {best_model_path}")
-    
-    return best_model_path, metrics_tracker
-
-
-def save_checkpoint(model, optimizer, scheduler, epoch, loss, save_path, is_best=False):
-    """
-    Save model checkpoint
-    
-    Args:
-        model: Model to save
-        optimizer: Optimizer state
-        scheduler: Scheduler state
-        epoch: Current epoch
-        loss: Current loss
-        save_path: Base path to save the model
-        is_best: Whether this is the best model so far
-    
-    Returns:
-        str: Path to the saved checkpoint
-    """
-    os.makedirs(save_path, exist_ok=True)
-    
-    # Only save if this is the best model so far
-    if is_best:
-        best_path = os.path.join(save_path, "best_model.pt")
-        
-        torch.save({
-            "model_state_dict": model.state_dict(),
-            "optimizer_state_dict": optimizer.state_dict(),
-            "scheduler_state_dict": scheduler.state_dict(),
-            "epoch": epoch,
-            "loss": loss
-        }, best_path)
-        
-        logger.info(f"Best model saved to {best_path}")
-        return best_path
-    
-    return None
-
-
-def setup_training(train_data, val_data, save_path, batch_size=2, num_epochs=10, 
-                   lr=2e-5, cross_attention_lr=1e-4, lora_r=16, lora_alpha=32):
-    """
-    Set up all components for training
-    
-    Args:
-        train_data: Training dataset
-        val_data: Validation dataset
-        save_path: Path to save models and metrics
-        batch_size: Batch size for training
-        num_epochs: Number of epochs to train
-        lr: Learning rate for LLM
-        cross_attention_lr: Learning rate for cross attention
-        lora_r: LoRA rank parameter
-        lora_alpha: LoRA alpha parameter
-        
-    Returns:
-        tuple: (best_model_path, metrics_tracker)
-    """
-    # Set random seeds for reproducibility
-    torch.manual_seed(42)
-    np.random.seed(42)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(42)
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+    from peft import LoraConfig, get_peft_model
+    import os
+    import sys
     
     # Set device
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if device is None:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
-    # Define global dtype to ensure consistency
-    dtype = torch.bfloat16
-    logger.info(f"Using {dtype} precision for model components")
-    
-    # Load Meditron-7B as LLM
-    llm_name = "epfl-llm/meditron-7b"
-    logger.info(f"Loading {llm_name}...")
-    llm = AutoModelForCausalLM.from_pretrained(
-        llm_name, 
-        torch_dtype=dtype, 
-        use_auth_token=True
-    ).to(device)
-    
-    # Import CT-CLIP
+    # Load checkpoint
     try:
-        vision_encoder = ctclip.visual_transformer
-        logger.info("Loaded CT-CLIP vision encoder")
-    except ImportError:
-        logger.error("CT-CLIP not found in path. Make sure it's properly imported.")
-        return None, None
+        checkpoint = torch.load(model_path, map_location=device)
+    except Exception as e:
+        logger.error(f"Error loading checkpoint: {e}")
+        return None
     
-    # Create robust vision feature extractor with matching dtype
-    vision_feature_extractor = RobustVisionFeatureExtractor(ctclip, device=device,dtype=dtype)
+    # Load LLM and tokenizer
+    llm_name = "epfl-llm/meditron-7b"
     
-    # Convert vision feature extractor projection to bfloat16
-    vision_feature_extractor.projection = vision_feature_extractor.projection.to(dtype=dtype)
-    
-    # Apply LoRA to the language model
-    lora_config = LoraConfig(
-        r=lora_r,
-        lora_alpha=lora_alpha,
-        lora_dropout=0.1,
-        target_modules=["q_proj", "v_proj", "k_proj", "o_proj"],
-        bias="none"
-    )
-    llm = get_peft_model(llm, lora_config)
-    logger.info("Applied LoRA configuration to LLM")
-    
-    # Create cross-attention layer with matching dtype
-    cross_attention = CrossAttentionLayer(
-        text_dim=llm.config.hidden_size,
-        vision_dim=vision_feature_extractor.feature_dim
-    ).to(device).to(dtype=dtype)
-    
-    # Create report generator model
-    model = CTReportGenerator(
-        llm=llm,
-        vision_feature_extractor=vision_feature_extractor,
-        cross_attention=cross_attention
-    ).to(device)
-    
-    # Load tokenizer
-    tokenizer = AutoTokenizer.from_pretrained(llm_name)
-    tokenizer.pad_token = tokenizer.eos_token
-    model.tokenizer = tokenizer
-    
-    # Log datasets
-    logger.info(f"Using training dataset with {len(train_data)} samples")
-    logger.info(f"Using validation dataset with {len(val_data)} samples")
-    
-    # Create optimizer with different learning rates for different components
-    optimizer = optim.AdamW(
-        [
-            {"params": model.llm.parameters(), "lr": lr},
-            {"params": model.cross_attention.parameters(), "lr": cross_attention_lr}
-        ],
-        weight_decay=0.01
-    )
-    
-    # Calculate total steps for the scheduler
-    total_steps = len(train_data) * num_epochs // batch_size
-    
-    # Create scheduler (OneCycleLR with warmup and cosine decay)
-    scheduler = optim.lr_scheduler.OneCycleLR(
-        optimizer,
-        max_lr=[lr, cross_attention_lr],
-        total_steps=total_steps,
-        pct_start=0.1,  # 10% of training for warmup
-        anneal_strategy='cos',
-        div_factor=25.0,  # Initial LR will be max_lr/25
-        final_div_factor=10000.0  # Final LR will be max_lr/10000
-    )
-    
-    # Create evaluator
-    from evaluation_module import NLGMetricsEvaluator
-    val_dataloader = DataLoader(val_data, batch_size=1, shuffle=False)
-    evaluator = NLGMetricsEvaluator(model, vision_encoder, val_dataloader, device=device)
-    
-    logger.info(f"Starting training for {num_epochs} epochs...")
-    
-    # Train model
-    best_model_path, metrics_tracker = train_report_generator(
-        model=model,
-        train_dataset=train_data,
-        optimizer=optimizer,
-        scheduler=scheduler,
-        num_epochs=num_epochs,
-        batch_size=batch_size,
-        save_path=save_path,
-        test_dataset=val_data,
-        eval_frequency=1,  
-        vision_encoder=vision_encoder,
-        evaluator=evaluator
-    )
-    
-    return best_model_path, metrics_tracker
+    try:
+        # Load LLM with optimized parameters
+        llm = AutoModelForCausalLM.from_pretrained(
+            llm_name, 
+            torch_dtype=torch.bfloat16,  # Use BF16 for better memory efficiency
+            device_map="auto",           # Better memory management
+            use_auth_token=True
+        )
+        
+        # Apply LoRA (with reduced parameters)
+        lora_config = LoraConfig(
+            r=8,                # Reduced from 16
+            lora_alpha=16,      # Reduced from 32
+            lora_dropout=0.05,  # Lower dropout
+            target_modules=["q_proj", "v_proj"],  # Fewer target modules
+            bias="none"
+        )
+        llm = get_peft_model(llm, lora_config)
+        
+        # Enable gradient checkpointing if available
+        if hasattr(llm, "gradient_checkpointing_enable"):
+            llm.gradient_checkpointing_enable()
+            logger.info("Gradient checkpointing enabled")
+        
+        # Load tokenizer
+        tokenizer = AutoTokenizer.from_pretrained(llm_name)
+        tokenizer.pad_token = tokenizer.eos_token
+        
+        # Import CT-CLIP
+        try:
+            sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+            from ct_clip.pretrained_model import ctclip
+            
+            # Create feature extractor with reduced feature dimension
+            vision_feature_extractor = RobustVisionFeatureExtractor(
+                ctclip, 
+                feature_dim=256,  # Reduced from 512
+                device=device
+            )
+            
+            # Create cross-attention with fewer heads
+            cross_attention = CrossAttentionLayer(
+                text_dim=llm.config.hidden_size,
+                vision_dim=vision_feature_extractor.feature_dim,
+                num_heads=4,      # Reduced from 8
+                dropout=0.05      # Reduced from 0.1
+            ).to(device)
+            
+            # Create model
+            model = CTReportGenerator(
+                llm=llm,
+                vision_feature_extractor=vision_feature_extractor,
+                cross_attention=cross_attention
+            ).to(device)
+            
+            # Set tokenizer
+            model.tokenizer = tokenizer
+            
+            # Load state dict
+            try:
+                model.load_state_dict(checkpoint["model_state_dict"])
+                logger.info(f"Model loaded from {model_path}")
+            except Exception as loading_error:
+                logger.error(f"Error loading state dictionary: {loading_error}")
+                logger.info("Attempting to load with strict=False...")
+                model.load_state_dict(checkpoint["model_state_dict"], strict=False)
+                logger.info(f"Model loaded with strict=False from {model_path}")
+            
+            return model
+            
+        except ImportError:
+            logger.error("CT-CLIP not found in path. Make sure it's properly imported.")
+            return None
+            
+    except Exception as e:
+        logger.error(f"Error loading model: {e}")
+        import traceback
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        return None

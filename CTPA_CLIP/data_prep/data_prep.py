@@ -46,6 +46,7 @@ split_idx = int(len(ct_metadata) * 0.8)
 train_df = ct_metadata
 test_df = ct_metadata.iloc[split_idx:]
 
-
+print(len(train_df))
+print(len(test_df))
 train_df.to_csv("C:/Users/STRATHMORE/Desktop/Sharon_Tonui/CTPA-CLIP/CTPA_CLIP/data/train_metadata.csv", index=False)
 test_df.to_csv("C:/Users/STRATHMORE/Desktop/Sharon_Tonui/CTPA-CLIP/CTPA_CLIP/data/test_metadata.csv", index=False)
